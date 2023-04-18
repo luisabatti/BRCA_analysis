@@ -1,0 +1,596 @@
+---
+title: "Analyzing and clustering breast cancer patients using R"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 1
+    fig_width: 8
+    fig_height: 6
+    df_print: paged
+---
+
+# Rationale for analyzing gene expression in breast cancer
+
+👉 Cancer is one of the world’s leading causes of death, accounting for nearly 10 million, or around one in six deaths worldwide in 2020 (World Health Organization, 2020). 
+
+👉 Cancer is by far the leading cause of death in Canada – about 43% of Canadians will develop some type of cancer in their lifetime, with 1 in 4 Canadians expected to die of this disease (Canadian Cancer Society, 2021). 
+
+👉 Breast cancer (BRCA) is the most frequent form of cancer to affect Canadian women; in total, 1 in 8 females is expected to develop this malignancy in their course of life (Canadian Cancer Society, 2021).
+
+👉 Tumourigenic cells depend on aberrant gene expression to continuously sustain growth and bypass their regulatory checkpoints.
+
+👉 The Cancer Genome Atlas (TCGA), a landmark cancer genomics program, characterized over 20,000 primary cancer and matched normal samples spanning 33 cancer types. 
+
+🕵️ We are going to query the TCGA database to investigate the genes that are overexpressed in breast cancer patients. We are then going to use this dataset to classify the different types of breast cancer. 
+
+## Required packages
+
+👉 The following packages will be required for this project: 👈 
+
+1. tidyverse
+2. TCGAbiolinks
+3. DESeq2
+4. biomaRt
+5. plotly
+6. ggforce
+7. rstatix
+8. ggpubr
+
+Let's load our packages:
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(TCGAbiolinks)
+library(DESeq2)
+library(biomaRt)
+library(plotly)
+library(ggforce)
+library(rstatix)
+library(ggpubr)
+```
+
+And let's define the subfolders in which our data will be stored 👌
+
+```{r}
+MainDirectory <- getwd()
+#Main parent directory
+
+RNAseqDirectory <- paste0(MainDirectory,"/RNAseq_files/")
+#Indicate directory to save downloaded files
+```
+
+# Querying data from TCGA
+Now let's query data from TCGA. The project name for BRCA is "TCGA-BRCA". 
+
+👍 There are other cancer types in which a similar code could be used. Feel free to explore!
+
+```{r include=FALSE}
+query <- GDCquery(project = "TCGA-BRCA",
+                    data.category = "Transcriptome Profiling",
+                    data.type = "Gene Expression Quantification",
+                    workflow.type = "STAR - Counts",
+                    sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+```
+Once we have queried all the data sets needed, we finally download them to the folder defined by "RNAseqDirectory". 
+
+```{r include=FALSE}
+  GDCdownload(query = query,
+              directory = RNAseqDirectory)
+```
+
+Next, we need to process the downloaded files and merge them into a single summarizedExperiment dataset. 
+
+```{r include=FALSE}
+  dataDown <- GDCprepare(query = query,
+                         save = F,
+                         directory =  RNAseqDirectory,
+                         summarizedExperiment = T)
+```
+🤝 We now have a variable, dataDown, with all the data that we need. 
+
+Let's extract the patient information from it:
+
+```{r}
+TCGA_info <- as.data.frame(SummarizedExperiment::colData(dataDown)) %>%
+    remove_rownames %>%
+    dplyr::select(project_id, patient, sample, barcode, shortLetterCode)
+
+glimpse(TCGA_info)
+```
+
+❗️ Our new TCGA_info variable will contain the metadata from each tumour sample ❗️
+
+There are two main categories:
+
+1. **NT:** Normal Tissue
+2. **TP:** Tumour Primary
+
+👉 We will use this metadata to separate the gene expression info into two matrices and use DESeq2 to contrast them. 
+
+```{r}
+NT <- assay(dataDown)[,(TCGA_info %>%
+                             dplyr::filter(shortLetterCode == "NT")) %>%
+                           .$barcode]
+
+TP <- assay(dataDown)[,(TCGA_info %>%
+                             dplyr::filter(shortLetterCode == "TP")) %>%
+                           .$barcode]
+
+deseq2_matrix <- cbind(NT, TP) %>% .[, order(colnames(.))]
+```
+
+And we further format our metadata to create a matrix with sample barcode and condition (NT or TP), sorted by sample barcode to match our deseq2_table. This is crucial for the dds function to work! 🔉
+
+```{r}
+phenodata <- TCGA_info %>% 
+  dplyr::select(barcode, shortLetterCode) %>% 
+  dplyr::arrange(barcode) %>% 
+  dplyr::mutate(shortLetterCode = as.factor(shortLetterCode)) %>% 
+  column_to_rownames(., var = "barcode")
+
+head(phenodata)
+```
+
+🌟 Finally, we check if all the entries in the phenodata matrix are in the same order as the columns in deseq2_matrix 🌟 
+
+```{r}
+if (all(rownames(phenodata) %in% colnames(deseq2_matrix))) {
+  
+  print(paste("All rows in phenodata are columns in DESeq2 count matrix"))
+  
+  if (all(rownames(phenodata) == colnames(deseq2_matrix))) {
+      print(paste("All rows in phenodata are in the same order of columns in DESeq2 count matrix"))
+  } else {
+      stop("Not all rows in phenodata are in the same order of columns in DESeq2 count matrix")
+  }
+} else {
+    stop("Not all rows in phenodata are columns in DESeq2 count matrix")
+}
+```
+
+✅ We now have everything we need to run DESeq2 and calculate differentially expressed genes! 
+
+## Running DESeq2 differential expression analysis
+
+🤝 First, let's load gene counts and phenodata into a dds object and set the comparison based on shortLetterCode values (TP vs NT). 
+
+```{r}
+dds <- DESeqDataSetFromMatrix(deseq2_matrix, phenodata,  design = ~ shortLetterCode)
+
+dds$shortLetterCode <- relevel(dds$shortLetterCode, ref = "NT")
+  #Establishes normal samples (NT) as the default for comparison
+```
+
+👇 We then run DESeq2 on the dds object:
+```{r include=FALSE}
+dds <- DESeq(dds)
+```
+Finally, we run a shrinkage algorithm to calculate the log2 foldchange (log2FC) of each gene:
+
+```{r message=FALSE, warning=FALSE}
+res <- lfcShrink(dds, coef=2, type="apeglm")
+```
+
+🚨 Problem: the TCGA dataset comes with gene IDs and their version number in an ID.VERSION format. Gene names do not contain version information, so we will strip this information from their gene IDs using the dot character "." as a separator. We won't need the version column so it will be removed. 🚨
+
+```{r}
+results <- as.data.frame(res) %>% 
+  rownames_to_column(var = "ensembl_gene_id") %>%
+  separate_wider_delim(ensembl_gene_id, ".", names = c("ensembl_gene_id", NA))
+
+```
+
+📍 We need to acquire the gene names for each gene ID from the results table. We will use the biomaRt tool to query the ENSEMBL database.
+
+```{r}
+ensembl_mart <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+
+ensembl_names <- getBM(attributes=c('ensembl_gene_id',
+                          'external_gene_name'),
+             values = results$ensembl_gene_id,
+             mart = ensembl_mart)
+
+ensembl_names <- ensembl_names %>%
+  dplyr::rename(ensembl_gene_name = external_gene_name)
+```
+
+🚨 Problem: some gene entries do not have a gene name assigned.
+
+```{r}
+glimpse(ensembl_names %>% filter(ensembl_gene_name == ""))
+```
+
+👌 For simplicity, we are going to remove genes that do not have any assigned name.
+
+```{r}
+ensembl_names <- ensembl_names %>%
+  filter(!ensembl_gene_name == "")
+
+print(paste("We are not left with", nrow(ensembl_names), "genes with valid entries."))
+```
+
+Finally, we merge the table with gene ids and gene names back into our results table. 
+
+```{r}
+results_deseq2 <- results %>%
+  dplyr::inner_join(., ensembl_names, by = "ensembl_gene_id") %>%
+  dplyr::arrange(desc(log2FoldChange)) %>%
+  dplyr::select(ensembl_gene_id, ensembl_gene_name, everything())
+
+glimpse(results_deseq2)
+
+```
+
+✅ And voilà, we now have a table of differentially expressed genes in breast cancer patients. We have the following 7 columns in our dataset:
+
+1. **ensembl_gene_id:** This is the gene ID for each gene and this is the key column to match any additional tables. 
+2. **ensembl_gene_name:** This is the name of each gene.
+3. **baseMean:** this is the average gene expression count for each gene across all samples.
+4. **log2FoldChange:** this is the log2 fold change between tumour (TP) vs. normal (NT) samples. Positive values (log2FoldChange > 0) represent genes that gain expression in tumour samples. Negative values (log2FoldChange < 0) represent genes that have a lower expression in tumour samples.
+5. **lfcSE:** this represents the standard deviation (although the name may indicate standard error) of the log2FoldChange
+6. **pvalue:** this represents the statistical test to highlight how significant is the gain/loss of expression between TP vs. NT.
+7. **padj:** this represents the FDR adjustment to reduce Type I error within the multiple p-value calculations. 
+
+🚨 Problem: There are a lot of genes that have a baseMean value of 0, which means that each of these genes has no detectable expression in any of the analyzed samples. 🚨
+
+👌 To save memory (and time), let's get rid of them. 
+
+```{r}
+results_deseq2 <- results_deseq2 %>%
+  filter(baseMean > 0)
+
+glimpse(results_deseq2)
+```
+# Visualizing differentially expressed genes between tumour vs. normal tissue
+
+👉 We can easily visualize all of the differentially expressed genes using a plot called "Volcano Plot" 👈
+
+First, we need to determine which genes are significantly upregulated or downregulated. For this, we will create three different thresholds:
+
+👉 Genes with a log2FoldChange > 1 and padj < 0.01 will be considered significantly upregulated in tumour samples and will be coloured pink.
+👉 Genes with a log2FoldChange < -1 and padj < 0.01 will be considered significantly downregulated in tumour samples and will be coloured blue.
+👉 Genes with a -1 ≦ log2FoldChange ≦ 1 or padj > 0.01 will be considered not significant and will be coloured grey.
+
+🤝 Let's create these groups of genes!
+
+```{r}
+results_deseq2_signif <- results_deseq2 %>% 
+  mutate(significant = case_when(log2FoldChange > 1 & padj < 0.01 ~ "Upregulated",
+                                 log2FoldChange < -1 & padj < 0.01 ~ "Downregulated",
+                                 TRUE ~ "Non-significant"))
+```
+
+And let's plot our volcano plot!
+
+```{r message=FALSE, warning=FALSE}
+results_deseq2_p <- plot_ly(data = results_deseq2_signif, 
+                            x = results_deseq2_signif$log2FoldChange, 
+                            y = -log10(results_deseq2_signif$padj), 
+                            text = results_deseq2_signif$ensembl_gene_name, 
+                            mode = "markers", 
+                            color = results_deseq2_signif$significant,
+                            colors = c("#3fc1c9", "#cccccc", "#fc5185")) %>%
+                            layout(shapes=list(list(type='line', x0 = -1, x1= -1, y0=0, y1=300, line=list(dash='dot', width=1)),
+                                          list(type='line', x0 = 1, x1= 1, y0=0, y1=300, line=list(dash='dot', width=1)),
+                                          list(type='line', x0 = min(results_deseq2_signif$log2FoldChange), x1= max(results_deseq2_signif$log2FoldChange), y0=-log10(0.01), y1=-log10(0.01), line=list(dash='dot', width=1))))
+
+
+results_deseq2_p
+```
+
+✅ We can now easily visualize how much each gene is differentially expressed between normal and tumour samples
+
+# Exploratory data analysis among breast cancer patients
+
+🕵️ Now that we have a table with all genes and their fold-change between tumour vs. normal tissue, let's take a look at a few interesting hits.
+
+👉 COSMIC has a list of genes that have documented activity relevant to cancer (https://cancer.sanger.ac.uk/cosmic/census?tier=1). We are going to use this list to filter our results table and highlight potential genes that are significantly upregulated in breast cancer 👈
+
+```{r message=FALSE, warning=FALSE}
+cosmic_genes <- read_csv("./cosmic_cancer_census.csv")
+
+glimpse(cosmic_genes)
+```
+
+🚨 We need to find a way to match these genes with our results table. The problem is that the ensembl_gene_id string is buried inside the 'Synonyms' column. Let's use regex to extract that information and transfer it to a new column called "ensembl_gene_id" 🚨 
+
+📍 We also don't really need most of the other columns so let's also get rid of them and only keep "Role in Cancer". Let's rename that to something easier to select such as role_in_cancer: 
+
+```{r}
+cosmic_genes_id <- cosmic_genes %>%
+  mutate(ensembl_gene_id = unlist(str_extract_all(.$Synonyms, "ENSG[0-9]{11}", simplify = F))) %>%
+  dplyr::select(ensembl_gene_id, `Role in Cancer`) %>%
+  rename(role_in_cancer = `Role in Cancer`)
+
+glimpse(cosmic_genes_id)
+```
+
+👌 There are a few genes that had no ENSEMBL gene ID, let's get rid of them:
+
+```{r}
+cosmic_genes_id <- cosmic_genes_id %>%
+  drop_na(ensembl_gene_id)
+```
+
+✅ Great, let's merge this table with our previous results table and take a look at the cancer-associated genes that are most upregulated in tumour samples:
+
+```{r}
+results_deseq2_cancer <- results_deseq2_signif %>%
+  inner_join(., cosmic_genes_id, by = "ensembl_gene_id") %>%
+  select(ensembl_gene_id, ensembl_gene_name, role_in_cancer, everything()) %>%
+  arrange(desc(log2FoldChange))
+
+results_deseq2_cancer
+```
+
+## Analyzing *SOX2* expression in breast cancer
+
+🤔 The 10th most upregulated gene associated with cancer in our table is *SOX2*, a gene associated with pluripotent and progenitor cells. That's interesting!
+
+👉 Let's visualize how the expression of this gene varies across tumour samples and normal tissue 👈
+
+First, we need to acquire the individual expression data from each sample. Let's extract the normalized gene counts from our dds object:
+
+```{r}
+results_deseq2_log2 <- normTransform(dds, f = log2, pc = 1)
+
+normalized_res <- as.data.frame(assay(results_deseq2_log2)) %>%
+    rownames_to_column(var = "ensembl_gene_id") %>%
+    separate_wider_delim(ensembl_gene_id, ".", names = c("ensembl_gene_id", NA)) %>%
+    inner_join(., ensembl_names, by = "ensembl_gene_id") %>%
+    select(ensembl_gene_id, ensembl_gene_name, everything())
+```
+
+👇 This massive matrix has rows as genes and columns as samples. 
+
+```{r}
+print(paste("Number of rows:", nrow(normalized_res)))
+
+print(paste("Number of columns:", ncol(normalized_res)))
+```
+
+🚨 We will need to reorganize this to have samples as rows with counts for a single gene as a column.
+
+```{r}
+gene_counts <- function(db, gene) {
+  c <- db %>%
+    filter(ensembl_gene_name == gene) %>%
+    #Filters gene name
+    pivot_longer(3:ncol(.), names_to = "barcode", values_to = "gene_log2counts") %>%
+    inner_join(., TCGA_info, by = c("barcode")) %>%
+    #Joins TCGA information
+    mutate(sample = str_sub(sample, start = 1L, end = 15L),
+           shortLetterCode = factor(shortLetterCode, levels = c("NT", "TP"))) %>%
+    #Remove the last character of the samples (vial) so that we average expression coming from the same tissue, even from different vials.        #This is so we can average expression in all vials from the same sample (example: some patients had 3 samples from the same tissue).
+    select(patient, sample, shortLetterCode, ensembl_gene_name, gene_log2counts) %>%
+    group_by(patient, sample, shortLetterCode, ensembl_gene_name) %>%
+    summarise(gene_log2counts = median(gene_log2counts)) %>%
+    #Takes median of multiple RNA-seq counts from the same patient
+    ungroup()
+  
+  return(c)
+}
+```
+
+👉 And now let's use this function to create a table with normalized *SOX2* reads for each sample:
+
+```{r message=FALSE, warning=FALSE}
+sox2_norm_res <- gene_counts(db = normalized_res, gene = "SOX2")
+
+glimpse(sox2_norm_res)
+```
+✅ Great, let's now visualize the expression of each sample in a graph.
+
+📍 First, let's create a function to plot a single gene. It takes the name of the variable with the original data, the name of the gene, and two options of colours for TP and NT data points:
+
+```{r}
+gene_viz <- function(df, gene, colours) {
+  
+  t_test_df <- df %>%
+    t_test(gene_log2counts ~ shortLetterCode) %>%
+    add_xy_position() %>%
+    add_significance(p.col = "p",
+                   output.col = "p.signif",
+                   cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                   symbols = c("***", "**", "*", "ns"))
+  
+  df_plot <- df %>%
+  filter(ensembl_gene_name == gene) %>%
+  ggplot(aes(x=shortLetterCode, y=gene_log2counts)) +
+  ggforce::geom_sina(aes(color = shortLetterCode), 
+                     scale = "count", 
+                     alpha = 0.25) +
+  ggpubr::stat_pvalue_manual(t_test_df, label = "p = {p}", size = 4, tip.length = 0.01) +
+  stat_summary(
+    fun.data="mean_sdl",  fun.args = list(mult=1), 
+    geom = "errorbar",  size = 0.8,
+    width = 0.2,
+    position = position_dodge(0.8)) +
+  stat_summary(
+    fun.y=mean, geom="point",
+    size = 6, shape = 3, stroke = 1,
+    position = position_dodge(0.8)) +
+  scale_y_continuous(limits = c(0, max(df$gene_log2counts) + 1), breaks = seq(0, max(df$gene_log2counts) + 1, 2)) +
+  scale_color_manual(values = colours) +
+  ylab(paste(gene,"expression (log2Counts)")) +
+  theme_linedraw() + 
+  theme(legend.position = "none",
+        panel.background = element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y = element_text(size=18, face = "bold"),
+        axis.text.x = element_text(face="bold", angle = 45, hjust = 1, size=12, colour = "#000000"),
+        plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_text(face="bold", size=12, colour = "#000000"),
+        strip.text.x = element_text(size = 12, face = "bold"),
+        panel.grid.major = element_line(colour = "grey", size = 0.1), 
+        panel.grid.minor = element_line(colour = "grey", size = 0.1))
+  
+  return(df_plot)
+}
+```
+
+🤝 Finally, let's plot our chart!
+
+```{r message=FALSE, warning=FALSE}
+ gene_viz(df = sox2_norm_res, gene = "SOX2", colours = c("NT" = "#3F72AF", "TP" = "#B83B5E"))
+```
+
+✅ Cool, we can definitely see that tumour samples have a higher average of *SOX2* expression compared to normal tissue!
+
+# Clustering breast cancer subtypes
+
+👉 Breast cancer has three major molecular subtypes: Luminal, HER2+, and Basal. Luminal subtypes can be further divided into Luminal A and Luminal B.
+
+🧐 These cancer subtypes have very distinct patterns of gene expression.
+
+🕵️ Can we cluster distinct cancer subtypes based on their patterns of gene expression?
+
+👉 First, let's see how a PCA looks like with the data that we already have. 
+
+## Using PCA to visualize distinct patterns of gene expression
+
+🚨 We need to utilize variance stabilizing transformation to reduce the dependence of the variance on the mean 🚨
+More details here: https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+```{r}
+vsd <- vst(dds, blind=FALSE)
+```
+
+👇 We now apply a PCA algorithm to this transformed dataset.
+
+```{r}
+pca <- plotPCA(vsd, intgroup="shortLetterCode", returnData=TRUE)
+```
+
+🎨 Let's create a function to visualize the PCA plot as a scatterplot.
+
+```{r}
+pca_viz <- function(df, colour_by, colours, title) {
+  
+  percentVar <- round(100 * attr(df, "percentVar"))
+  
+  df_plot <- df %>%
+  ggplot(aes(x = PC1, y = PC2, color = .data[[colour_by]])) +
+  geom_point(size=2.5, alpha = 0.75) +
+  scale_color_manual(values = colours) +
+  coord_fixed() +
+  ggtitle(title) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  theme_linedraw() +
+  theme(axis.text=element_text(size=12, face="bold"),
+        axis.title=element_text(size=12, face="bold"),
+        legend.text = element_text(size=12),
+        legend.position="bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  guides(scale="none")
+  
+  return(df_plot)
+}
+```
+
+```{r}
+pca_viz(df = pca, colour_by = "shortLetterCode", colours = c("NT" = "#3F72AF", "TP" = "#B83B5E"), title = "")
+```
+
+✅ Nice! We can easily see that there are two major clusters of TP samples in the PCA plot. 
+
+## Using k-means clustering to classify different cancer subtypes
+
+🤓 Let's see if we can use unsupervised machine learning to cluster different types of breast cancer together.
+
+👇 First, we will use the elbow method to calculate the ideal number of clusters in a K-means cluster algorithm. 
+
+```{r}
+set.seed(1234)
+
+k_elbow <- function(input, n_k, nstart) {
+  
+  k_df <- data.frame()
+  
+  for (n in 1:n_k) {
+    df <- data.frame(k_size = n, wss = kmeans(x = input, centers = n, nstart = nstart)$tot.withinss)
+    k_df <- bind_rows(k_df, df)
+  }
+  return(k_df)
+}
+
+k_wss <- k_elbow(input = t(assay(vsd)), n_k = 10, nstart = 25)
+```
+
+```{r}
+k_wss %>%
+  ggplot(aes(x = k_size, y = wss)) + 
+  geom_line() +
+  geom_point(size=3, shape=21, fill="black", colour="white", stroke=3) +
+  scale_x_continuous(limits = c(1, max(k_wss$k_size)), breaks = seq(1, max(k_wss$k_size), 1)) +
+  xlab("Number of K clusters") +
+  ylab("Within cluster sum of squares") +
+  theme_classic() +
+  theme(panel.background = element_rect(colour = "black"))
+```
+
+✅ It looks like the ideal number of K clusters is between 4 and 5. We will proceed with a K of 5.
+
+```{r}
+vsd_kcluster <- kmeans(t(assay(vsd)), centers = 5, nstart = 25)
+```
+
+🧐 Let's now see how the clusters look like in a graph.
+
+```{r}
+pca_kcluster <- pca %>%
+  mutate(cluster = factor(vsd_kcluster$cluster)) %>%
+  pca_viz(df = ., colour_by = "cluster", colours = c("1" = "#3F72AF", "2" = "#4daf4a", "3" = "#ff7f00", "4" = "#e41a1c", "5" = "#984ea3"), title = "K-means clustering")
+
+pca_kcluster
+```
+
+✅ Cool, it looks like we managed to separate each subtype quite well. 
+
+🧐 Now, let's compare our clustering with actual subtype classification. 
+
+👇 We can easily query the TCGA database to acquire the molecular subtype of each cancer sample. 
+
+```{r message=FALSE, warning=FALSE}
+brca_subtypes <- TCGAquery_subtype(tumor = "BRCA") %>%
+  mutate(patient = str_sub(patient, start = 1L, end = 12L),
+         subtype = BRCA_Subtype_PAM50) %>%
+  select(patient, subtype)
+
+glimpse(brca_subtypes)
+```
+🤝 Now let's integrate that back into our PCA dataset.
+
+```{r}
+brca_subtypes_pca <- pca %>%
+  mutate(patient = str_sub(name, start = 1L, end = 12L)) %>%
+  inner_join(., brca_subtypes, by = c("patient")) %>%
+  mutate(subtype = case_when(shortLetterCode == "NT" ~ "Normal",
+                             shortLetterCode == "TP" ~ as.character(subtype)),
+         subtype = factor(subtype, levels = c("Normal", "LumA", "LumB", "Her2", "Basal")))
+
+glimpse(brca_subtypes_pca)
+```
+
+🎨 And let's visualize a PCA plot with the different subtypes of breast cancer highlighted.
+
+```{r}
+pca_subtype <- pca_viz(df = brca_subtypes_pca, colour_by = "subtype", colours = c("Normal" = "#3F72AF", "LumA" = "#e41a1c", "LumB" = "#4daf4a", "Her2" = "#ff7f00", "Basal" = "#984ea3"), title = "BRCA subtypes")
+
+pca_subtype
+```
+
+👉 Finally, let's compare our K clustering to the actual subtype classification.
+
+```{r}
+ggarrange(pca_subtype, pca_kcluster, common.legend = T)
+```
+
+✅ We can see how our K-means clustering model was able to separate luminal subtypes from normal and basal quite well. 
+
+🚨 It did however have trouble separating Luminal A from Luminal B and classifying HER2+. 
+
+🤔 This likely indicates that gene expression alone is not enough to accurately separate all BRCA subtypes. Other phenotypic features would have to be added to the model to improve its accuracy. 
