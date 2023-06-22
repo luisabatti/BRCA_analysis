@@ -65,7 +65,7 @@ Now let's query data from TCGA. The project name for BRCA is "TCGA-BRCA".
 
 👍 There are other cancer types in which a similar code could be used. Feel free to explore!
 
-```{r include=FALSE}
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
 query <- GDCquery(project = "TCGA-BRCA",
                     data.category = "Transcriptome Profiling",
                     data.type = "Gene Expression Quantification",
@@ -74,14 +74,14 @@ query <- GDCquery(project = "TCGA-BRCA",
 ```
 Once we have queried all the data sets needed, we finally download them to the folder defined by "RNAseqDirectory". 
 
-```{r include=FALSE}
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
   GDCdownload(query = query,
               directory = RNAseqDirectory)
 ```
 
 Next, we need to process the downloaded files and merge them into a single summarizedExperiment dataset. 
 
-```{r include=FALSE}
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
   dataDown <- GDCprepare(query = query,
                          save = F,
                          directory =  RNAseqDirectory,
@@ -163,12 +163,12 @@ dds$shortLetterCode <- relevel(dds$shortLetterCode, ref = "NT")
 ```
 
 👇 We then run DESeq2 on the dds object:
-```{r include=FALSE}
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
 dds <- DESeq(dds)
 ```
 Finally, we run a shrinkage algorithm to calculate the log2 foldchange (log2FC) of each gene:
 
-```{r message=FALSE, warning=FALSE}
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
 res <- lfcShrink(dds, coef=2, type="apeglm")
 ```
 
