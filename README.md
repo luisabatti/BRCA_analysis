@@ -1,5 +1,6 @@
 # Analyzing and Clustering Breast Cancer Patients using R 
 [luisabatti.github.io/BRCA_analysis/](https://luisabatti.github.io/BRCA_analysis/)
+
 This project leverages the power of the TCGAbiolinks and DESeq2 packages to perform a comprehensive analysis of breast cancer transcriptome datasets sourced from The Cancer Genome Atlas (TCGA). The goal is to gain insights into the molecular landscape of breast cancer and identify misregulated genes in this disease.
 
 This pipeline encompasses data querying, data cleaning, differential expression analysis, visualization of differentially expressed genes between tumor and normal tissue samples, exploratory data analysis among breast cancer patients, and the application of principal component analysis (PCA) for patient clustering.
